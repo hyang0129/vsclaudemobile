@@ -177,7 +177,7 @@ async def ws_mobile(websocket: WebSocket, window_id: str):
 @app.get("/api/windows")
 async def list_windows():
     """Return list of connected devcon server window_ids."""
-    return {"windows": list(manager.devcons.keys())}
+    return {"windows": [{"id": wid, "name": wid} for wid in manager.devcons.keys()]}
 
 
 @app.get("/api/windows/{window_id}/sessions")

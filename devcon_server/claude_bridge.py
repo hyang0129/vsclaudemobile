@@ -292,7 +292,9 @@ async def send_input_async(session_id: str, text: str) -> dict[str, Any]:
     logger.debug("Extracted UUID: {}", uuid)
 
     cwd = _extract_cwd(path)
-    if cwd is None:
+    if cwd is None or not os.path.isdir(cwd):
+        if cwd is not None:
+            logger.warning("Extracted cwd does not exist: {}, falling back to session path parent", cwd)
         cwd = str(path.parent)
         logger.debug("Using fallback cwd from session path parent: {}", cwd)
     else:
@@ -409,6 +411,7 @@ async def tail_session(
                         except json.JSONDecodeError:
                             pass
             # File was truncated/recreated — reset so next poll reads from start
+            prev_line_count = last_line_count
             if current_line_count < last_line_count:
                 logger.info("Session {} file truncated (was {} lines, now {}), resetting",
                             session_id, last_line_count, current_line_count)
@@ -419,7 +422,7 @@ async def tail_session(
             if new_messages:
                 logger.info(
                     "Session {}: {} new messages (line {} → {})",
-                    session_id, len(new_messages), last_line_count, current_line_count,
+                    session_id, len(new_messages), prev_line_count, current_line_count,
                 )
                 for m in new_messages:
                     text_preview = ""

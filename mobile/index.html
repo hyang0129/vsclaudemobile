@@ -566,8 +566,8 @@
       card.className = 'card';
       card.innerHTML = `
         <div>
-          <div class="card-title">${escapeHtml(s.name || s.id)}</div>
-          <div class="card-sub">${escapeHtml(s.status || 'session')}</div>
+          <div class="card-title">${escapeHtml(s.title || s.id)}</div>
+          <div class="card-sub">${escapeHtml(s.project_path || 'session')}</div>
         </div>
         <span class="card-arrow">&#8250;</span>
       `;
@@ -581,7 +581,7 @@
     chatMessages.innerHTML = '';
     showView('chat');
     wsSend({ type: 'session_select', session_id: s.id });
-    appendMessage('system', `Connected to session ${s.name || s.id}`);
+    appendMessage('system', `Connected to session ${s.title || s.id}`);
   }
 
   // --- Chat ---
