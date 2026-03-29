@@ -2,14 +2,13 @@
 
 import asyncio
 import json
-import logging
 import os
 import subprocess
 import time
 from pathlib import Path
 from typing import Any, Callable, Coroutine
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 POLL_INTERVAL = 0.5  # seconds
@@ -22,10 +21,12 @@ def _find_session_files() -> list[Path]:
     files nested in subdirectories (e.g. <uuid>/subagents/*.jsonl).
     """
     if not CLAUDE_PROJECTS_DIR.exists():
-        logger.warning("Claude projects dir not found: %s", CLAUDE_PROJECTS_DIR)
+        logger.warning("Claude projects dir not found: {}", CLAUDE_PROJECTS_DIR)
         return []
     # Session files live at <project-dir>/<uuid>.jsonl — exactly one level deep
-    return sorted(CLAUDE_PROJECTS_DIR.glob("*/*.jsonl"))
+    files = sorted(CLAUDE_PROJECTS_DIR.glob("*/*.jsonl"))
+    logger.debug("Found {} JSONL session files in {}", len(files), CLAUDE_PROJECTS_DIR)
+    return files
 
 
 _KEPT_CONTENT_TYPES = {"text", "thinking", "tool_use", "tool_result"}
@@ -44,7 +45,7 @@ def _extract_content(content_blocks: Any) -> list[dict[str, Any]]:
         if block.get("type") in _KEPT_CONTENT_TYPES:
             result.append(block)
         else:
-            logger.debug("Dropping unknown content block type: %s", block.get("type"))
+            logger.debug("Dropping unknown content block type: {}", block.get("type"))
     return result
 
 
@@ -58,14 +59,17 @@ def _build_message(raw: Any) -> dict[str, Any] | None:
         return None
     record_type = raw.get("type")
     if record_type not in ("user", "assistant"):
+        logger.trace("Skipping JSONL record type={}", record_type)
         return None
 
     message = raw.get("message", {})
     if not isinstance(message, dict):
+        logger.warning("Record type={} has non-dict message field, skipping", record_type)
         return None
 
     role = message.get("role", record_type)
     content = _extract_content(message.get("content", []))
+    logger.trace("Built message: role={}, uuid={}, content_blocks={}", role, raw.get("uuid", "?")[:12], len(content))
 
     msg: dict[str, Any] = {
         "role": role,
@@ -109,13 +113,14 @@ def _parse_jsonl(path: Path) -> tuple[list[dict[str, Any]], str | None]:
                     try:
                         raw_records.append(json.loads(line))
                     except json.JSONDecodeError:
-                        logger.debug("Skipping malformed JSONL line in %s", path)
+                        logger.debug("Skipping malformed JSONL line in {}", path)
     except OSError as e:
-        logger.error("Failed to read session file %s: %s", path, e)
+        logger.error("Failed to read session file {}: {}", path, e)
         return [], None
 
     title = _extract_title(raw_records)
     messages = [m for r in raw_records if (m := _build_message(r)) is not None]
+    logger.debug("Parsed {}: {} raw records → {} messages, title={!r}", path.name, len(raw_records), len(messages), title)
     return messages, title
 
 
@@ -191,22 +196,25 @@ def list_sessions() -> list[dict[str, Any]]:
         )
     # Most recently modified first
     sessions.sort(key=lambda s: s["last_modified"], reverse=True)
-    logger.info("Found %d Claude sessions", len(sessions))
+    titled_count = sum(1 for s in sessions if s.get("title"))
+    logger.info("Found {} Claude sessions ({} with titles)", len(sessions), titled_count)
     return sessions
 
 
 def read_session(session_id: str) -> list[dict[str, Any]]:
     """Read full conversation history from a session's JSONL file."""
+    logger.debug("read_session called: session_id={}", session_id)
     try:
         path = _path_from_session_id(session_id)
     except ValueError:
-        logger.error("Invalid session_id: %s", session_id)
+        logger.error("Invalid session_id: {}", session_id)
         return []
     if not path.exists():
-        logger.error("Session file not found: %s", path)
+        logger.error("Session file not found: {}", path)
         return []
+    logger.debug("Reading session file: {}", path)
     messages, _ = _parse_jsonl(path)
-    logger.info("Read %d messages from session %s", len(messages), session_id)
+    logger.info("Read {} messages from session {}", len(messages), session_id)
     return messages
 
 
@@ -216,14 +224,15 @@ def send_input(session_id: str, text: str) -> dict[str, Any]:
     MVP approach: shells out to `claude` with the message text.
     The session_id is used to determine the project directory context.
     """
+    logger.debug("send_input called: session_id={}, text_len={}", session_id, len(text))
     try:
         path = _path_from_session_id(session_id)
     except ValueError:
-        logger.error("Invalid session_id: %s", session_id)
+        logger.error("Invalid session_id: {}", session_id)
         return {"success": False, "error": "Invalid session ID"}
     work_dir = str(path.parent) if path.parent.is_dir() else str(Path.home())
 
-    logger.info("Sending input to session %s: %s", session_id, text[:80])
+    logger.info("Sending input to session {}: {}", session_id, text[:80])
     try:
         result = subprocess.run(
             ["claude", "--print", text],
@@ -242,10 +251,10 @@ def send_input(session_id: str, text: str) -> dict[str, Any]:
         logger.error("claude CLI not found on PATH")
         return {"success": False, "error": "claude CLI not found"}
     except subprocess.TimeoutExpired:
-        logger.error("claude CLI timed out for session %s", session_id)
+        logger.error("claude CLI timed out for session {}", session_id)
         return {"success": False, "error": "CLI timeout"}
     except Exception as e:
-        logger.error("Failed to send input: %s", e)
+        logger.error("Failed to send input: {}", e)
         return {"success": False, "error": str(e)}
 
 
@@ -257,19 +266,20 @@ async def tail_session(
 
     Uses filesystem polling (mtime check every 500ms). Runs until cancelled.
     """
+    logger.debug("tail_session called: session_id={}", session_id)
     try:
         path = _path_from_session_id(session_id)
     except ValueError:
-        logger.error("Invalid session_id: %s", session_id)
+        logger.error("Invalid session_id: {}", session_id)
         return
     if not path.exists():
-        logger.error("Cannot tail non-existent session: %s", path)
+        logger.error("Cannot tail non-existent session: {}", path)
         return
 
     last_mtime = path.stat().st_mtime
     with open(path, "r", encoding="utf-8") as f:
         last_line_count = sum(1 for _ in f)
-    logger.info("Tailing session %s (starting at line %d)", session_id, last_line_count)
+    logger.info("Tailing session {} (starting at line {}, file={})", session_id, last_line_count, path)
 
     while True:
         await asyncio.sleep(POLL_INTERVAL)
@@ -298,7 +308,7 @@ async def tail_session(
                             pass
             # File was truncated/recreated — reset so next poll reads from start
             if current_line_count < last_line_count:
-                logger.info("Session %s file truncated (was %d lines, now %d), resetting",
+                logger.info("Session {} file truncated (was {} lines, now {}), resetting",
                             session_id, last_line_count, current_line_count)
                 last_line_count = 0
             else:
@@ -306,12 +316,23 @@ async def tail_session(
 
             if new_messages:
                 logger.info(
-                    "Session %s: %d new messages", session_id, len(new_messages)
+                    "Session {}: {} new messages (line {} → {})",
+                    session_id, len(new_messages), last_line_count, current_line_count,
                 )
+                for m in new_messages:
+                    text_preview = ""
+                    for c in m.get("content", []):
+                        if c.get("type") == "text":
+                            text_preview = c.get("text", "")[:100]
+                            break
+                    logger.debug("  new msg: role={}, uuid={}, preview={!r}",
+                                 m["role"], m["uuid"][:12], text_preview)
                 await callback(new_messages)
+            else:
+                logger.trace("Session {} mtime changed but no new user/assistant messages", session_id)
 
         except OSError as e:
-            logger.error("Error tailing session %s: %s", session_id, e)
+            logger.error("Error tailing session {}: {}", session_id, e)
         except asyncio.CancelledError:
-            logger.info("Stopped tailing session %s", session_id)
+            logger.info("Stopped tailing session {}", session_id)
             raise

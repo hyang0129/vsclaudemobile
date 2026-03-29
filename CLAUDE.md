@@ -59,6 +59,18 @@ interceptor share the same dependency set (no per-component requirements files).
 uv sync        # install/update all deps
 ```
 
+## Logging
+
+Use **loguru** (`from loguru import logger`) for all logging — never stdlib `logging`.
+**Overlog rather than underlog.** Every function entry, exit, branch, and data transformation
+should have a log call. Use TRACE for per-record/per-line detail, DEBUG for function-level
+flow, INFO for operations and results, WARNING/ERROR for problems.
+
+Log files are written to `/tmp/vsclaudemobile/` at TRACE level regardless of the console
+log level. This makes troubleshooting possible even when running at INFO on the console.
+
+When adding new code: if in doubt, add a log line. Logs are cheap; debugging without them is not.
+
 ## Commands
 
 ```bash
