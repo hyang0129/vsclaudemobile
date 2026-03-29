@@ -282,6 +282,15 @@
       padding: 40px;
       color: #666;
     }
+
+    /* --- Disabled input state --- */
+    #input-bar textarea:disabled { opacity: 0.5; }
+    #input-bar button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* --- Content block styles --- */
+    .msg .thinking { color: #888; font-style: italic; margin-bottom: 4px; }
+    .msg .tool-use { color: #dcdcaa; font-size: 12px; margin-bottom: 4px; }
+    .msg .tool-result { color: #888; font-size: 12px; margin-bottom: 4px; }
   </style>
 </head>
 <body>
@@ -362,6 +371,7 @@
   let hubHost = localStorage.getItem('hub_host') || location.host;
   let selectedWindowId = null;
   let selectedSessionId = null;
+  let writeActive = false;
 
   hubUrlInput.value = hubHost;
 
@@ -469,7 +479,28 @@
 
   function handleWsMessage(data) {
     if (data.type === 'session_output') {
-      appendMessage(data.role || 'assistant', data.content || '');
+      const messages = data.messages || [];
+      if (data.full_history) {
+        chatMessages.innerHTML = '';
+      }
+      messages.forEach(msg => appendSessionMessage(msg));
+    } else if (data.type === 'write_started') {
+      writeActive = true;
+      msgInput.disabled = true;
+      sendBtn.disabled = true;
+      appendMessage('system', 'Claude is thinking...');
+    } else if (data.type === 'write_ended') {
+      writeActive = false;
+      msgInput.disabled = false;
+      sendBtn.disabled = false;
+      // Remove the "thinking" indicator
+      const msgs = chatMessages.querySelectorAll('.msg.system');
+      msgs.forEach(el => {
+        if (el.textContent === 'Claude is thinking...') el.remove();
+      });
+      if (data.success === false) {
+        appendMessage('system', 'Error: ' + (data.error || 'write failed'));
+      }
     }
   }
 
@@ -562,11 +593,50 @@
     chatMessages.scrollTop = chatMessages.scrollHeight;
   }
 
+  function appendSessionMessage(msg) {
+    const role = msg.role || 'assistant';
+    const contentBlocks = msg.content || [];
+    const div = document.createElement('div');
+    div.className = `msg ${role}`;
+
+    contentBlocks.forEach(block => {
+      const el = document.createElement('div');
+      if (block.type === 'text') {
+        el.className = 'text-block';
+        el.style.whiteSpace = 'pre-wrap';
+        el.textContent = block.text || '';
+      } else if (block.type === 'thinking') {
+        el.className = 'thinking';
+        el.textContent = 'Thinking... ' + (block.thinking || '');
+      } else if (block.type === 'tool_use') {
+        el.className = 'tool-use';
+        const inputSummary = block.input ? JSON.stringify(block.input).slice(0, 120) : '';
+        el.textContent = 'Tool: ' + (block.name || 'unknown') + (inputSummary ? ' \u2014 ' + inputSummary : '');
+      } else if (block.type === 'tool_result') {
+        el.className = 'tool-result';
+        const resultText = typeof block.content === 'string' ? block.content : JSON.stringify(block.content || '');
+        el.textContent = resultText.slice(0, 300);
+      } else {
+        el.textContent = JSON.stringify(block);
+      }
+      div.appendChild(el);
+    });
+
+    // If no content blocks, show empty message
+    if (contentBlocks.length === 0) {
+      div.textContent = '(empty message)';
+    }
+
+    chatMessages.appendChild(div);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+
   function sendMessage() {
+    if (writeActive) return;
     const text = msgInput.value.trim();
     if (!text) return;
     appendMessage('user', text);
-    wsSend({ type: 'session_input', session_id: selectedSessionId, content: text });
+    wsSend({ type: 'session_input', session_id: selectedSessionId, text: text });
     msgInput.value = '';
     autoResizeInput();
   }

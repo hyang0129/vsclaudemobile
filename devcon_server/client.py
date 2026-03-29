@@ -1,9 +1,10 @@
-"""Interceptor client — connects to hub_server and bridges Claude Code sessions."""
+"""Devcon server client — connects to hub_server and bridges Claude Code sessions."""
 
 import asyncio
 import json
 import os
 import socket
+import time
 from typing import Any
 
 import websockets
@@ -13,7 +14,7 @@ from websockets.asyncio.client import connect
 from . import claude_bridge
 
 
-class InterceptorClient:
+class DevconClient:
     """WebSocket client that connects to the hub and serves session data."""
 
     def __init__(self, hub_host: str, hub_port: int):
@@ -22,11 +23,12 @@ class InterceptorClient:
         self.window_id = os.environ.get("WINDOW_ID", socket.gethostname())
         self._ws: websockets.ClientConnection | None = None
         self._tail_tasks: dict[str, asyncio.Task] = {}
-        logger.info("InterceptorClient initialized: hub={}:{}, window_id={}", hub_host, hub_port, self.window_id)
+        self._active_writes: dict[str, asyncio.Task] = {}
+        logger.info("DevconClient initialized: hub={}:{}, window_id={}", hub_host, hub_port, self.window_id)
 
     @property
     def ws_url(self) -> str:
-        return f"ws://{self.hub_host}:{self.hub_port}/ws/interceptor/{self.window_id}"
+        return f"ws://{self.hub_host}:{self.hub_port}/ws/devcon/{self.window_id}"
 
     async def _send(self, msg: dict[str, Any]) -> None:
         """Send a JSON message over the WebSocket."""
@@ -85,7 +87,7 @@ class InterceptorClient:
         logger.info("Now tailing session {} (active tails: {})", session_id, len(self._tail_tasks))
 
     async def _handle_session_input(self, msg: dict[str, Any]) -> None:
-        """Send user input to a Claude Code session."""
+        """Send user input to a Claude Code session (async write path)."""
         session_id = msg.get("session_id")
         text = msg.get("text", "")
         if not session_id or not text:
@@ -93,19 +95,56 @@ class InterceptorClient:
             return
 
         logger.info("Received input for session {}: {!r}", session_id, text[:80])
-        # Run the blocking CLI call in a thread
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None, claude_bridge.send_input, session_id, text
-        )
-        logger.info("Input result for session {}: success={}", session_id, result.get("success"))
-        await self._send(
-            {
-                "type": "session_input_result",
+
+        # Concurrent write guard (per-session)
+        if session_id in self._active_writes:
+            logger.warning("Rejecting concurrent write to session {}", session_id)
+            await self._send({
+                "type": "write_ended",
                 "session_id": session_id,
-                "result": result,
-            }
-        )
+                "success": False,
+                "error": "A write is already in progress for this session. Please wait for it to complete.",
+                "duration_ms": None,
+                "returncode": None,
+            })
+            return
+
+        # Signal write started
+        await self._send({"type": "write_started", "session_id": session_id})
+
+        # Run the write as an async task
+        task = asyncio.create_task(self._execute_write(session_id, text))
+        self._active_writes[session_id] = task
+
+    async def _execute_write(self, session_id: str, text: str) -> None:
+        """Execute a write operation and send write_ended when complete."""
+        start_time = time.monotonic()
+        try:
+            result = await claude_bridge.send_input_async(session_id, text)
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            logger.info("Write completed for session {}: success={}, duration={}ms",
+                        session_id, result.get("success"), duration_ms)
+            await self._send({
+                "type": "write_ended",
+                "session_id": session_id,
+                "success": result.get("success", False),
+                "error": result.get("error") or (result.get("stderr") if not result.get("success") else None),
+                "duration_ms": duration_ms,
+                "returncode": result.get("returncode"),
+            })
+        except Exception as e:
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            logger.error("Write failed for session {}: {}", session_id, e)
+            await self._send({
+                "type": "write_ended",
+                "session_id": session_id,
+                "success": False,
+                "error": str(e),
+                "duration_ms": duration_ms,
+                "returncode": None,
+            })
+        finally:
+            self._active_writes.pop(session_id, None)
 
     # ── Tail callback ─────────────────────────────────────────────────
 
@@ -162,7 +201,7 @@ class InterceptorClient:
 
     async def run(self) -> None:
         """Connect to the hub and process messages. Reconnects on failure."""
-        logger.info("InterceptorClient.run() starting, target={}", self.ws_url)
+        logger.info("DevconClient.run() starting, target={}", self.ws_url)
         while True:
             try:
                 logger.info("Connecting to hub at {}", self.ws_url)

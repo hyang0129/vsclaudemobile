@@ -1,4 +1,4 @@
-"""Hub server: relays messages between interceptors (devcontainers) and mobile clients."""
+"""Hub server: relays messages between devcon servers (devcontainers) and mobile clients."""
 
 import asyncio
 import json
@@ -18,30 +18,30 @@ app = FastAPI(title="Hub Server", version="0.1.0")
 
 
 class ConnectionManager:
-    """Tracks connected interceptors and mobile clients by window_id."""
+    """Tracks connected devcon servers and mobile clients by window_id."""
 
     def __init__(self):
         # window_id -> WebSocket
-        self.interceptors: dict[str, WebSocket] = {}
+        self.devcons: dict[str, WebSocket] = {}
         # window_id -> list[WebSocket]
         self.mobile_clients: dict[str, list[WebSocket]] = {}
-        # For proxied REST requests waiting on interceptor responses.
+        # For proxied REST requests waiting on devcon server responses.
         # key: (window_id, request_id) -> asyncio.Future
         self.pending_requests: dict[tuple[str, str], asyncio.Future] = {}
         self._request_counter = 0
 
-    # -- interceptor management --
+    # -- devcon server management --
 
-    def connect_interceptor(self, window_id: str, ws: WebSocket):
-        self.interceptors[window_id] = ws
-        logger.info("Interceptor connected: %s", window_id)
+    def connect_devcon(self, window_id: str, ws: WebSocket):
+        self.devcons[window_id] = ws
+        logger.info("Devcon server connected: %s", window_id)
 
-    def disconnect_interceptor(self, window_id: str):
-        self.interceptors.pop(window_id, None)
-        logger.info("Interceptor disconnected: %s", window_id)
+    def disconnect_devcon(self, window_id: str):
+        self.devcons.pop(window_id, None)
+        logger.info("Devcon server disconnected: %s", window_id)
 
-    def get_interceptor(self, window_id: str) -> Optional[WebSocket]:
-        return self.interceptors.get(window_id)
+    def get_devcon(self, window_id: str) -> Optional[WebSocket]:
+        return self.devcons.get(window_id)
 
     # -- mobile management --
 
@@ -91,21 +91,21 @@ manager = ConnectionManager()
 # ---------------------------------------------------------------------------
 
 
-@app.websocket("/ws/interceptor/{window_id}")
-async def ws_interceptor(websocket: WebSocket, window_id: str):
+@app.websocket("/ws/devcon/{window_id}")
+async def ws_devcon(websocket: WebSocket, window_id: str):
     await websocket.accept()
-    manager.connect_interceptor(window_id, websocket)
+    manager.connect_devcon(window_id, websocket)
     try:
         while True:
             raw = await websocket.receive_text()
             try:
                 message = json.loads(raw)
             except json.JSONDecodeError:
-                logger.warning("Non-JSON message from interceptor %s", window_id)
+                logger.warning("Non-JSON message from devcon server %s", window_id)
                 continue
 
             msg_type = message.get("type")
-            logger.debug("Interceptor %s -> type=%s", window_id, msg_type)
+            logger.debug("Devcon %s -> type=%s", window_id, msg_type)
 
             # If this is a response to a proxied REST request, resolve it.
             request_id = message.get("request_id")
@@ -125,10 +125,10 @@ async def ws_interceptor(websocket: WebSocket, window_id: str):
                 manager.disconnect_mobile(window_id, d)
 
     except WebSocketDisconnect:
-        manager.disconnect_interceptor(window_id)
+        manager.disconnect_devcon(window_id)
     except Exception:
-        logger.exception("Interceptor ws error for %s", window_id)
-        manager.disconnect_interceptor(window_id)
+        logger.exception("Devcon ws error for %s", window_id)
+        manager.disconnect_devcon(window_id)
 
 
 @app.websocket("/ws/mobile/{window_id}")
@@ -145,21 +145,21 @@ async def ws_mobile(websocket: WebSocket, window_id: str):
                 continue
 
             msg_type = message.get("type")
-            logger.debug("Mobile -> interceptor %s, type=%s", window_id, msg_type)
+            logger.debug("Mobile -> devcon %s, type=%s", window_id, msg_type)
 
-            # Relay to the interceptor for this window.
-            interceptor = manager.get_interceptor(window_id)
-            if interceptor is None:
-                err = json.dumps({"type": "error", "message": f"No interceptor connected for window {window_id}"})
+            # Relay to the devcon server for this window.
+            devcon = manager.get_devcon(window_id)
+            if devcon is None:
+                err = json.dumps({"type": "error", "message": f"No devcon server connected for window {window_id}"})
                 await websocket.send_text(err)
                 continue
 
             try:
-                await interceptor.send_text(raw)
+                await devcon.send_text(raw)
             except Exception:
-                logger.exception("Failed to relay to interceptor %s", window_id)
-                manager.disconnect_interceptor(window_id)
-                err = json.dumps({"type": "error", "message": f"Interceptor for window {window_id} disconnected"})
+                logger.exception("Failed to relay to devcon server %s", window_id)
+                manager.disconnect_devcon(window_id)
+                err = json.dumps({"type": "error", "message": f"Devcon server for window {window_id} disconnected"})
                 await websocket.send_text(err)
 
     except WebSocketDisconnect:
@@ -176,18 +176,18 @@ async def ws_mobile(websocket: WebSocket, window_id: str):
 
 @app.get("/api/windows")
 async def list_windows():
-    """Return list of connected interceptor window_ids."""
-    return {"windows": list(manager.interceptors.keys())}
+    """Return list of connected devcon server window_ids."""
+    return {"windows": list(manager.devcons.keys())}
 
 
 @app.get("/api/windows/{window_id}/sessions")
 async def list_sessions(window_id: str):
-    """Proxy a session_list request to the interceptor and return the response."""
-    interceptor = manager.get_interceptor(window_id)
-    if interceptor is None:
+    """Proxy a session_list request to the devcon server and return the response."""
+    devcon = manager.get_devcon(window_id)
+    if devcon is None:
         return JSONResponse(
             status_code=404,
-            content={"error": f"No interceptor connected for window {window_id}"},
+            content={"error": f"No devcon server connected for window {window_id}"},
         )
 
     request_id = manager.next_request_id()
@@ -199,13 +199,13 @@ async def list_sessions(window_id: str):
     })
 
     try:
-        await interceptor.send_text(request_msg)
+        await devcon.send_text(request_msg)
     except Exception:
-        logger.exception("Failed to send session_list to interceptor %s", window_id)
-        manager.disconnect_interceptor(window_id)
+        logger.exception("Failed to send session_list to devcon server %s", window_id)
+        manager.disconnect_devcon(window_id)
         return JSONResponse(
             status_code=502,
-            content={"error": "Failed to reach interceptor"},
+            content={"error": "Failed to reach devcon server"},
         )
 
     try:
@@ -214,7 +214,7 @@ async def list_sessions(window_id: str):
         manager.pending_requests.pop((window_id, request_id), None)
         return JSONResponse(
             status_code=504,
-            content={"error": "Interceptor did not respond in time"},
+            content={"error": "Devcon server did not respond in time"},
         )
 
     return result

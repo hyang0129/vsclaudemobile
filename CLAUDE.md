@@ -13,19 +13,18 @@ with Claude Code sessions from your phone, connected to devcontainer workspaces.
 - Navigation hierarchy: **Hub → Window (devcontainer) → Session (claude ext session)**
 - MVP: single hub, single devcontainer, read + write a claude session
 
-### 2. Interceptor Server (`interceptor/`)
+### 2. Devcon Server (`devcon_server/`)
 - Runs inside each devcontainer
 - Reads from and writes to the VSCode Claude Code extension
-- Read path is straightforward; write path needs state consistency
-  (devcontainer state must match mobile writes)
-- Candidate approach: CLI puppeting, since the VSCode Claude ext uses the CLI
-- Requires further testing for write consistency
+- Read path: discovers and tails JSONL session files under `~/.claude/projects/`
+- Write path: spawns `claude --print --resume <uuid>` to send messages to sessions
+- Sends `write_started`/`write_ended` signals to mobile during writes
 
 ### 3. Hub Server (`hub_server/`)
 - Runs on the host machine
-- Interceptors connect to the hub
+- Devcon servers connect to the hub
 - Hub exposes access to the mobile app via TailScale
-- Manages connections between interceptors and mobile clients
+- Manages connections between devcon servers and mobile clients
 
 ## MVP Scope
 
@@ -37,7 +36,7 @@ with Claude Code sessions from your phone, connected to devcontainer workspaces.
 
 - **Mobile**: PWA (single-file HTML/CSS/JS), dark theme matching VSCode
 - **Hub Server**: Python, FastAPI, WebSockets, uvicorn — port 8420
-- **Interceptor**: Python, websockets, asyncio — CLI puppeting via `claude` CLI
+- **Devcon Server**: Python, websockets, asyncio — CLI invocation via `claude` CLI
 - **Protocol**: WebSocket JSON messages with `type` field
 - **Networking**: TailScale for mobile ↔ hub connectivity
 
@@ -45,15 +44,17 @@ with Claude Code sessions from your phone, connected to devcontainer workspaces.
 
 | Type | Direction | Purpose |
 |------|-----------|---------|
-| `session_list` | mobile→hub→interceptor→hub→mobile | List available sessions |
-| `session_select` | mobile→hub→interceptor | Start watching a session |
-| `session_output` | interceptor→hub→mobile | Session content updates |
-| `session_input` | mobile→hub→interceptor | Send input to a session |
+| `session_list` | mobile→hub→devcon→hub→mobile | List available sessions |
+| `session_select` | mobile→hub→devcon | Start watching a session |
+| `session_output` | devcon→hub→mobile | Session content updates |
+| `session_input` | mobile→hub→devcon | Send input to a session |
+| `write_started` | devcon→hub→mobile | Write operation began (disable input) |
+| `write_ended` | devcon→hub→mobile | Write operation finished (re-enable input) |
 
 ## Package Management
 
 Uses **uv** with a single `pyproject.toml` at the repo root. Both hub_server and
-interceptor share the same dependency set (no per-component requirements files).
+devcon_server share the same dependency set (no per-component requirements files).
 
 ```bash
 uv sync        # install/update all deps
@@ -77,8 +78,8 @@ When adding new code: if in doubt, add a log line. Logs are cheap; debugging wit
 # Hub server (run on host, port 8420)
 uv run python -m hub_server
 
-# Interceptor (run inside devcontainer)
-uv run python -m interceptor --hub-host <host-ip> --hub-port 8420
+# Devcon server (run inside devcontainer)
+uv run python -m devcon_server --hub-host <host-ip> --hub-port 8420
 
 # Mobile dev server (port 8421)
 uv run python mobile/serve.py

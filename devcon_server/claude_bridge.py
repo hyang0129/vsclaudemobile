@@ -1,9 +1,10 @@
 """Interface to Claude Code CLI and session data."""
 
 import asyncio
+import glob as globmod
 import json
 import os
-import subprocess
+import signal
 import time
 from pathlib import Path
 from typing import Any, Callable, Coroutine
@@ -12,6 +13,7 @@ from loguru import logger
 
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 POLL_INTERVAL = 0.5  # seconds
+WRITE_TIMEOUT_SECS = int(os.environ.get("CLAUDE_WRITE_TIMEOUT_SECS", "600"))
 
 
 def _find_session_files() -> list[Path]:
@@ -218,44 +220,144 @@ def read_session(session_id: str) -> list[dict[str, Any]]:
     return messages
 
 
-def send_input(session_id: str, text: str) -> dict[str, Any]:
-    """Send input to a Claude Code session via the CLI.
+def _extract_session_uuid(session_id: str) -> str:
+    """Extract the UUID stem from a session ID (e.g. 'project/abc-123.jsonl' -> 'abc-123')."""
+    return Path(session_id).stem
 
-    MVP approach: shells out to `claude` with the message text.
-    The session_id is used to determine the project directory context.
+
+def _extract_cwd(session_path: Path) -> str | None:
+    """Read the JSONL file and return the cwd from the first 'user' record, or None."""
+    logger.debug("Extracting cwd from {}", session_path)
+    try:
+        with open(session_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict) and record.get("type") == "user":
+                    cwd = record.get("cwd")
+                    if cwd:
+                        logger.debug("Found cwd={!r} in first user record", cwd)
+                        return str(cwd)
+    except OSError as e:
+        logger.warning("Could not read session file for cwd extraction: {}", e)
+    logger.debug("No cwd found in session file {}", session_path)
+    return None
+
+
+def _find_claude_binary() -> str:
+    """Locate the claude CLI binary, checking VSCode extension paths first."""
+    # Check devcontainer VSCode server paths
+    pattern = str(
+        Path.home()
+        / ".vscode-server"
+        / "cli"
+        / "servers"
+        / "*"
+        / "server"
+        / "node_modules"
+        / "@anthropic-ai"
+        / "claude-code"
+        / "cli.js"
+    )
+    matches = sorted(globmod.glob(pattern))
+    if matches:
+        binary = matches[-1]  # latest server version
+        logger.debug("Found claude binary at VSCode extension path: {}", binary)
+        return binary
+
+    # Fallback: assume claude is on PATH
+    logger.debug("No VSCode extension binary found, falling back to 'claude' on PATH")
+    return "claude"
+
+
+async def send_input_async(session_id: str, text: str) -> dict[str, Any]:
+    """Send input to a Claude Code session via the CLI (async).
+
+    Resumes the session identified by session_id using `claude --print --resume <uuid>`.
+    Returns a dict with success, returncode, stderr, and optionally error.
     """
-    logger.debug("send_input called: session_id={}, text_len={}", session_id, len(text))
+    logger.debug("send_input_async called: session_id={}, text_len={}", session_id, len(text))
     try:
         path = _path_from_session_id(session_id)
     except ValueError:
         logger.error("Invalid session_id: {}", session_id)
-        return {"success": False, "error": "Invalid session ID"}
-    work_dir = str(path.parent) if path.parent.is_dir() else str(Path.home())
+        return {"success": False, "error": "Invalid session ID", "returncode": None}
 
-    logger.info("Sending input to session {}: {}", session_id, text[:80])
+    uuid = _extract_session_uuid(session_id)
+    logger.debug("Extracted UUID: {}", uuid)
+
+    cwd = _extract_cwd(path)
+    if cwd is None:
+        cwd = str(path.parent)
+        logger.debug("Using fallback cwd from session path parent: {}", cwd)
+    else:
+        logger.debug("Using cwd from session file: {}", cwd)
+
+    claude_binary = _find_claude_binary()
+    if claude_binary.endswith(".js"):
+        cmd = ["node", claude_binary, "--print", "--resume", uuid, "--permission-mode", "bypassPermissions", text]
+    else:
+        cmd = [claude_binary, "--print", "--resume", uuid, "--permission-mode", "bypassPermissions", text]
+    logger.info("Sending input to session {} (uuid={}): {!r}", session_id, uuid, text[:80])
+    logger.debug("Command: {}", cmd)
+    logger.debug("Working directory: {}", cwd)
+
     try:
-        result = subprocess.run(
-            ["claude", "--print", text],
-            cwd=work_dir,
-            capture_output=True,
-            text=True,
-            timeout=120,
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
         )
+        logger.debug("Subprocess started, pid={}", process.pid)
+
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                process.communicate(), timeout=WRITE_TIMEOUT_SECS
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Claude CLI timed out after {}s for session {}, sending SIGTERM",
+                           WRITE_TIMEOUT_SECS, session_id)
+            try:
+                process.send_signal(signal.SIGTERM)
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5)
+                    logger.debug("Process terminated gracefully after SIGTERM")
+                except asyncio.TimeoutError:
+                    logger.warning("Process did not terminate after SIGTERM, sending SIGKILL")
+                    process.kill()
+                    await process.wait()
+            except ProcessLookupError:
+                logger.debug("Process already exited before signal could be sent")
+            return {
+                "success": False,
+                "error": f"CLI timeout after {WRITE_TIMEOUT_SECS}s",
+                "returncode": None,
+            }
+
+        returncode = process.returncode
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip() if stderr_bytes else ""
+        logger.info("Claude CLI exited: returncode={}, stderr_len={}", returncode, len(stderr_text))
+        if stderr_text:
+            logger.debug("stderr: {}", stderr_text[:500])
+
         return {
-            "success": result.returncode == 0,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "returncode": result.returncode,
+            "success": returncode == 0,
+            "returncode": returncode,
+            "stderr": stderr_text,
         }
+
     except FileNotFoundError:
-        logger.error("claude CLI not found on PATH")
-        return {"success": False, "error": "claude CLI not found"}
-    except subprocess.TimeoutExpired:
-        logger.error("claude CLI timed out for session {}", session_id)
-        return {"success": False, "error": "CLI timeout"}
+        logger.error("Claude CLI not found: {}", claude_binary)
+        return {"success": False, "error": f"claude CLI not found: {claude_binary}", "returncode": None}
     except Exception as e:
-        logger.error("Failed to send input: {}", e)
-        return {"success": False, "error": str(e)}
+        logger.error("Failed to send input to session {}: {}", session_id, e)
+        return {"success": False, "error": str(e), "returncode": None}
 
 
 async def tail_session(
