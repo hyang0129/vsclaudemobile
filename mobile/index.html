@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#1e1e1e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Claude Mobile</title>
+  <link rel="manifest" href="/manifest.json">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      background: #1e1e1e;
+      color: #d4d4d4;
+      font-family: 'Menlo', 'Consolas', 'Courier New', monospace;
+      font-size: 14px;
+      -webkit-tap-highlight-color: transparent;
+      overflow: hidden;
+    }
+
+    /* --- Layout --- */
+    #app {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      border-bottom: 1px solid #333;
+      min-height: 48px;
+      flex-shrink: 0;
+    }
+
+    header .back-btn {
+      background: none;
+      border: none;
+      color: #569cd6;
+      font-size: 16px;
+      padding: 8px 12px 8px 0;
+      cursor: pointer;
+      min-width: 44px;
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+    }
+
+    header .back-btn.hidden { visibility: hidden; }
+
+    header .title {
+      font-size: 15px;
+      font-weight: 600;
+      color: #e0e0e0;
+      flex: 1;
+      text-align: center;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    header .settings-btn {
+      background: none;
+      border: none;
+      color: #888;
+      font-size: 20px;
+      padding: 8px 0 8px 12px;
+      cursor: pointer;
+      min-width: 44px;
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #f44;
+      display: inline-block;
+      margin-right: 8px;
+      flex-shrink: 0;
+    }
+    .status-dot.connected { background: #4ec94e; }
+
+    /* --- Views --- */
+    .view {
+      flex: 1;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      display: none;
+      flex-direction: column;
+    }
+    .view.active { display: flex; }
+
+    /* Transitions */
+    .view {
+      animation: fadeIn 0.2s ease;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateX(20px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+
+    /* --- Cards (windows / sessions) --- */
+    .card-list {
+      padding: 12px 16px;
+    }
+
+    .card {
+      background: #252526;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 10px;
+      cursor: pointer;
+      min-height: 52px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      transition: background 0.15s;
+    }
+    .card:active { background: #2a2d2e; }
+
+    .card .card-title {
+      font-size: 14px;
+      color: #e0e0e0;
+    }
+    .card .card-sub {
+      font-size: 12px;
+      color: #888;
+      margin-top: 4px;
+    }
+    .card .card-arrow {
+      color: #555;
+      font-size: 18px;
+      margin-left: 12px;
+    }
+
+    .empty-msg {
+      color: #666;
+      text-align: center;
+      padding: 40px 16px;
+      font-size: 13px;
+    }
+
+    /* --- Chat --- */
+    #chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 12px 16px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .msg {
+      max-width: 85%;
+      padding: 10px 14px;
+      border-radius: 12px;
+      margin-bottom: 8px;
+      font-size: 13px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+
+    .msg.user {
+      align-self: flex-end;
+      background: #264f78;
+      color: #d4d4d4;
+      border-bottom-right-radius: 4px;
+    }
+
+    .msg.assistant {
+      align-self: flex-start;
+      background: #252526;
+      border: 1px solid #333;
+      color: #d4d4d4;
+      border-bottom-left-radius: 4px;
+    }
+
+    .msg.system {
+      align-self: center;
+      color: #888;
+      font-size: 12px;
+      background: none;
+      padding: 4px;
+    }
+
+    /* --- Input bar --- */
+    #input-bar {
+      display: none;
+      padding: 8px 12px;
+      border-top: 1px solid #333;
+      background: #1e1e1e;
+      flex-shrink: 0;
+      gap: 8px;
+      align-items: flex-end;
+    }
+    #input-bar.active { display: flex; }
+
+    #input-bar textarea {
+      flex: 1;
+      background: #252526;
+      border: 1px solid #333;
+      border-radius: 8px;
+      color: #d4d4d4;
+      font-family: inherit;
+      font-size: 14px;
+      padding: 10px 12px;
+      resize: none;
+      max-height: 120px;
+      line-height: 1.4;
+      outline: none;
+    }
+    #input-bar textarea:focus { border-color: #569cd6; }
+
+    #input-bar button {
+      background: #569cd6;
+      border: none;
+      border-radius: 8px;
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
+      padding: 10px 16px;
+      min-width: 44px;
+      min-height: 44px;
+      cursor: pointer;
+    }
+    #input-bar button:active { background: #4a8abf; }
+
+    /* --- Settings panel --- */
+    #settings-panel {
+      display: none;
+      padding: 24px 16px;
+    }
+    #settings-panel.active { display: block; }
+
+    #settings-panel label {
+      display: block;
+      font-size: 13px;
+      color: #888;
+      margin-bottom: 6px;
+    }
+
+    #settings-panel input {
+      width: 100%;
+      background: #252526;
+      border: 1px solid #333;
+      border-radius: 6px;
+      color: #d4d4d4;
+      font-family: inherit;
+      font-size: 14px;
+      padding: 10px 12px;
+      outline: none;
+      margin-bottom: 16px;
+    }
+    #settings-panel input:focus { border-color: #569cd6; }
+
+    #settings-panel .save-btn {
+      background: #569cd6;
+      border: none;
+      border-radius: 6px;
+      color: #fff;
+      font-size: 14px;
+      padding: 10px 20px;
+      cursor: pointer;
+      min-height: 44px;
+    }
+    #settings-panel .save-btn:active { background: #4a8abf; }
+
+    /* --- Loading --- */
+    .spinner {
+      text-align: center;
+      padding: 40px;
+      color: #666;
+    }
+  </style>
+</head>
+<body>
+
+<div id="app">
+  <header>
+    <button class="back-btn hidden" id="back-btn">&larr;</button>
+    <span class="status-dot" id="status-dot"></span>
+    <span class="title" id="header-title">Claude Mobile</span>
+    <button class="settings-btn" id="settings-btn">&#9881;</button>
+  </header>
+
+  <!-- Windows list -->
+  <div class="view active" id="view-windows">
+    <div class="card-list" id="window-list">
+      <div class="empty-msg">Connecting to hub...</div>
+    </div>
+  </div>
+
+  <!-- Sessions list -->
+  <div class="view" id="view-sessions">
+    <div class="card-list" id="session-list">
+      <div class="empty-msg">Loading sessions...</div>
+    </div>
+  </div>
+
+  <!-- Chat view -->
+  <div class="view" id="view-chat">
+    <div id="chat-messages"></div>
+  </div>
+
+  <!-- Settings panel (overlays) -->
+  <div class="view" id="view-settings">
+    <div id="settings-panel" class="active">
+      <label for="hub-url-input">Hub Server URL</label>
+      <input type="text" id="hub-url-input" placeholder="e.g. 192.168.1.10:8420">
+      <button class="save-btn" id="save-settings-btn">Save</button>
+    </div>
+  </div>
+
+  <!-- Input bar (shown in chat view) -->
+  <div id="input-bar">
+    <textarea id="msg-input" rows="1" placeholder="Send a message..."></textarea>
+    <button id="send-btn">Send</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // --- DOM refs ---
+  const app = document.getElementById('app');
+  const backBtn = document.getElementById('back-btn');
+  const settingsBtn = document.getElementById('settings-btn');
+  const headerTitle = document.getElementById('header-title');
+  const statusDot = document.getElementById('status-dot');
+  const inputBar = document.getElementById('input-bar');
+  const msgInput = document.getElementById('msg-input');
+  const sendBtn = document.getElementById('send-btn');
+  const chatMessages = document.getElementById('chat-messages');
+
+  const views = {
+    windows: document.getElementById('view-windows'),
+    sessions: document.getElementById('view-sessions'),
+    chat: document.getElementById('view-chat'),
+    settings: document.getElementById('view-settings'),
+  };
+
+  const windowList = document.getElementById('window-list');
+  const sessionList = document.getElementById('session-list');
+  const hubUrlInput = document.getElementById('hub-url-input');
+  const saveSettingsBtn = document.getElementById('save-settings-btn');
+
+  // --- State ---
+  let currentView = 'windows';
+  let ws = null;
+  let hubHost = localStorage.getItem('hub_host') || location.host;
+  let selectedWindowId = null;
+  let selectedSessionId = null;
+
+  hubUrlInput.value = hubHost;
+
+  // --- Navigation ---
+  function showView(name) {
+    Object.values(views).forEach(v => v.classList.remove('active'));
+    views[name].classList.add('active');
+    currentView = name;
+
+    backBtn.classList.toggle('hidden', name === 'windows');
+    inputBar.classList.toggle('active', name === 'chat');
+
+    const titles = {
+      windows: 'Claude Mobile',
+      sessions: 'Sessions',
+      chat: selectedSessionId || 'Chat',
+      settings: 'Settings',
+    };
+    headerTitle.textContent = titles[name] || 'Claude Mobile';
+  }
+
+  backBtn.addEventListener('click', () => {
+    if (currentView === 'settings') {
+      showView('windows');
+    } else if (currentView === 'chat') {
+      showView('sessions');
+    } else if (currentView === 'sessions') {
+      showView('windows');
+    }
+  });
+
+  settingsBtn.addEventListener('click', () => {
+    if (currentView === 'settings') {
+      showView('windows');
+    } else {
+      showView('settings');
+    }
+  });
+
+  // --- Settings ---
+  saveSettingsBtn.addEventListener('click', () => {
+    const val = hubUrlInput.value.trim();
+    if (val) {
+      hubHost = val;
+      localStorage.setItem('hub_host', hubHost);
+      connectWs();
+      showView('windows');
+      loadWindows();
+    }
+  });
+
+  // --- API helpers ---
+  function apiBase() {
+    const proto = location.protocol === 'https:' ? 'https' : 'http';
+    return `${proto}://${hubHost}`;
+  }
+
+  async function apiFetch(path) {
+    const res = await fetch(`${apiBase()}${path}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+
+  // --- WebSocket ---
+  function connectWs() {
+    if (ws) {
+      ws.onclose = null;
+      ws.close();
+    }
+
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const windowId = selectedWindowId || '_';
+    const url = `${proto}://${hubHost}/ws/mobile/${windowId}`;
+
+    try {
+      ws = new WebSocket(url);
+    } catch (e) {
+      setConnected(false);
+      return;
+    }
+
+    ws.onopen = () => setConnected(true);
+    ws.onclose = () => {
+      setConnected(false);
+      setTimeout(connectWs, 3000);
+    };
+    ws.onerror = () => setConnected(false);
+
+    ws.onmessage = (event) => {
+      let data;
+      try { data = JSON.parse(event.data); } catch { return; }
+      handleWsMessage(data);
+    };
+  }
+
+  function setConnected(connected) {
+    statusDot.classList.toggle('connected', connected);
+  }
+
+  function wsSend(msg) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(msg));
+    }
+  }
+
+  function handleWsMessage(data) {
+    if (data.type === 'session_output') {
+      appendMessage(data.role || 'assistant', data.content || '');
+    }
+  }
+
+  // --- Windows ---
+  async function loadWindows() {
+    windowList.innerHTML = '<div class="spinner">Loading windows...</div>';
+    try {
+      const windows = await apiFetch('/api/windows');
+      renderWindows(Array.isArray(windows) ? windows : (windows.windows || []));
+    } catch (e) {
+      windowList.innerHTML = `<div class="empty-msg">Could not load windows.<br>${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  function renderWindows(windows) {
+    if (!windows.length) {
+      windowList.innerHTML = '<div class="empty-msg">No windows available.</div>';
+      return;
+    }
+    windowList.innerHTML = '';
+    windows.forEach(w => {
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.innerHTML = `
+        <div>
+          <div class="card-title">${escapeHtml(w.name || w.id)}</div>
+          <div class="card-sub">${escapeHtml(w.status || 'container')}</div>
+        </div>
+        <span class="card-arrow">&#8250;</span>
+      `;
+      card.addEventListener('click', () => selectWindow(w));
+      windowList.appendChild(card);
+    });
+  }
+
+  function selectWindow(w) {
+    selectedWindowId = w.id;
+    headerTitle.textContent = w.name || w.id;
+    connectWs();
+    showView('sessions');
+    loadSessions(w.id);
+  }
+
+  // --- Sessions ---
+  async function loadSessions(windowId) {
+    sessionList.innerHTML = '<div class="spinner">Loading sessions...</div>';
+    try {
+      const sessions = await apiFetch(`/api/windows/${windowId}/sessions`);
+      renderSessions(Array.isArray(sessions) ? sessions : (sessions.sessions || []));
+    } catch (e) {
+      sessionList.innerHTML = `<div class="empty-msg">Could not load sessions.<br>${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  function renderSessions(sessions) {
+    if (!sessions.length) {
+      sessionList.innerHTML = '<div class="empty-msg">No sessions available.</div>';
+      return;
+    }
+    sessionList.innerHTML = '';
+    sessions.forEach(s => {
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.innerHTML = `
+        <div>
+          <div class="card-title">${escapeHtml(s.name || s.id)}</div>
+          <div class="card-sub">${escapeHtml(s.status || 'session')}</div>
+        </div>
+        <span class="card-arrow">&#8250;</span>
+      `;
+      card.addEventListener('click', () => selectSession(s));
+      sessionList.appendChild(card);
+    });
+  }
+
+  function selectSession(s) {
+    selectedSessionId = s.id;
+    chatMessages.innerHTML = '';
+    showView('chat');
+    wsSend({ type: 'session_select', session_id: s.id });
+    appendMessage('system', `Connected to session ${s.name || s.id}`);
+  }
+
+  // --- Chat ---
+  function appendMessage(role, content) {
+    const div = document.createElement('div');
+    div.className = `msg ${role}`;
+    div.textContent = content;
+    chatMessages.appendChild(div);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+
+  function sendMessage() {
+    const text = msgInput.value.trim();
+    if (!text) return;
+    appendMessage('user', text);
+    wsSend({ type: 'session_input', session_id: selectedSessionId, content: text });
+    msgInput.value = '';
+    autoResizeInput();
+  }
+
+  sendBtn.addEventListener('click', sendMessage);
+
+  msgInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+
+  // Auto-resize textarea
+  function autoResizeInput() {
+    msgInput.style.height = 'auto';
+    msgInput.style.height = Math.min(msgInput.scrollHeight, 120) + 'px';
+  }
+  msgInput.addEventListener('input', autoResizeInput);
+
+  // --- Util ---
+  function escapeHtml(str) {
+    const d = document.createElement('div');
+    d.textContent = str;
+    return d.innerHTML;
+  }
+
+  // --- Service Worker ---
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  }
+
+  // --- Init ---
+  connectWs();
+  loadWindows();
+})();
+</script>
+
+</body>
+</html>
