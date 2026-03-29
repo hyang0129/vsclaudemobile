@@ -50,23 +50,24 @@ with Claude Code sessions from your phone, connected to devcontainer workspaces.
 | `session_output` | interceptor→hub→mobile | Session content updates |
 | `session_input` | mobile→hub→interceptor | Send input to a session |
 
-## Venv
+## Package Management
 
-```
-source /workspaces/.venvs/vsclaudemobile/bin/activate
+Uses **uv** with a single `pyproject.toml` at the repo root. Both hub_server and
+interceptor share the same dependency set (no per-component requirements files).
+
+```bash
+uv sync        # install/update all deps
 ```
 
 ## Commands
 
 ```bash
 # Hub server (run on host, port 8420)
-cd hub_server && pip install -r requirements.txt
-python -m hub_server
+uv run python -m hub_server
 
 # Interceptor (run inside devcontainer)
-cd interceptor && pip install -r requirements.txt
-python -m interceptor --hub-host <host-ip> --hub-port 8420
+uv run python -m interceptor --hub-host <host-ip> --hub-port 8420
 
-# Mobile dev server (port 8421, or serve via hub)
-cd mobile && python serve.py
+# Mobile dev server (port 8421)
+uv run python mobile/serve.py
 ```
