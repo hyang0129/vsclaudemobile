@@ -76,8 +76,9 @@ class DevconClient:
             }
         )
 
-        # Cancel any existing tail for a different session
+        # Cancel tails and writes for other sessions
         self._cancel_tail(session_id)
+        self._cancel_active_writes(session_id)
 
         # Start tailing for new messages
         task = asyncio.create_task(
@@ -174,6 +175,18 @@ class DevconClient:
             if sid == keep_session_id and not t.done()
         }
 
+    def _cancel_active_writes(self, keep_session_id: str | None = None) -> None:
+        """Cancel running write tasks, optionally keeping one."""
+        for sid, task in list(self._active_writes.items()):
+            if sid != keep_session_id and not task.done():
+                task.cancel()
+                logger.info("Cancelled active write for session {}", sid)
+        self._active_writes = {
+            sid: t
+            for sid, t in self._active_writes.items()
+            if sid == keep_session_id and not t.done()
+        }
+
     # ── Main loop ─────────────────────────────────────────────────────
 
     _HANDLERS = {
@@ -218,6 +231,7 @@ class DevconClient:
             finally:
                 self._ws = None
                 self._cancel_tail()
+                self._cancel_active_writes()
 
             logger.info("Reconnecting in 3 seconds...")
             await asyncio.sleep(3)
