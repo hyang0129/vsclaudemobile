@@ -162,7 +162,8 @@ def _path_from_session_id(session_id: str) -> Path:
     Raises ValueError if the resolved path escapes CLAUDE_PROJECTS_DIR.
     """
     resolved = (CLAUDE_PROJECTS_DIR / session_id).resolve()
-    if not str(resolved).startswith(str(CLAUDE_PROJECTS_DIR.resolve())):
+    projects_resolved = CLAUDE_PROJECTS_DIR.resolve()
+    if projects_resolved not in resolved.parents and resolved != projects_resolved:
         raise ValueError(f"session_id escapes projects dir: {session_id!r}")
     return resolved
 
@@ -266,7 +267,8 @@ async def tail_session(
         return
 
     last_mtime = path.stat().st_mtime
-    last_line_count = sum(1 for _ in open(path, "r", encoding="utf-8"))
+    with open(path, "r", encoding="utf-8") as f:
+        last_line_count = sum(1 for _ in f)
     logger.info("Tailing session %s (starting at line %d)", session_id, last_line_count)
 
     while True:
@@ -294,7 +296,13 @@ async def tail_session(
                                 new_messages.append(msg)
                         except json.JSONDecodeError:
                             pass
-            last_line_count = current_line_count
+            # File was truncated/recreated — reset so next poll reads from start
+            if current_line_count < last_line_count:
+                logger.info("Session %s file truncated (was %d lines, now %d), resetting",
+                            session_id, last_line_count, current_line_count)
+                last_line_count = 0
+            else:
+                last_line_count = current_line_count
 
             if new_messages:
                 logger.info(
