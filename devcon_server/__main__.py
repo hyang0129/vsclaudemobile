@@ -1,4 +1,4 @@
-"""Entry point for the interceptor component."""
+"""Entry point for the devcon_server component."""
 
 import argparse
 import asyncio
@@ -6,14 +6,14 @@ import sys
 
 from loguru import logger
 
-from .client import InterceptorClient
+from .client import DevconClient
 
 LOG_DIR = "/tmp/vsclaudemobile"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Interceptor — bridges Claude Code sessions to the hub server"
+        description="Devcon server — bridges Claude Code sessions to the hub server"
     )
     parser.add_argument(
         "--hub-host",
@@ -44,17 +44,17 @@ def main() -> None:
     ))
     # Always log everything to file at TRACE level for troubleshooting
     logger.add(
-        f"{LOG_DIR}/interceptor.log",
+        f"{LOG_DIR}/devcon_server.log",
         level="TRACE",
         rotation="10 MB",
         retention="3 days",
         format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} — {message}",
     )
 
-    logger.info("Interceptor starting: hub={}:{}, log_level={}, log_file={}/interceptor.log",
+    logger.info("Devcon server starting: hub={}:{}, log_level={}, log_file={}/devcon_server.log",
                  args.hub_host, args.hub_port, args.log_level, LOG_DIR)
 
-    client = InterceptorClient(hub_host=args.hub_host, hub_port=args.hub_port)
+    client = DevconClient(hub_host=args.hub_host, hub_port=args.hub_port)
     asyncio.run(client.run())
 
 
