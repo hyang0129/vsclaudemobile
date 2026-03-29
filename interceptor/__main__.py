@@ -2,9 +2,13 @@
 
 import argparse
 import asyncio
-import logging
+import sys
+
+from loguru import logger
 
 from .client import InterceptorClient
+
+LOG_DIR = "/tmp/vsclaudemobile"
 
 
 def main() -> None:
@@ -24,16 +28,31 @@ def main() -> None:
     )
     parser.add_argument(
         "--log-level",
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Logging level (default: INFO)",
+        default="DEBUG",
+        choices=["TRACE", "DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging level (default: DEBUG)",
     )
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    # Remove default stderr handler and re-add with chosen level
+    logger.remove()
+    logger.add(sys.stderr, level=args.log_level, format=(
+        "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+        "<level>{level: <8}</level> | "
+        "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> — "
+        "<level>{message}</level>"
+    ))
+    # Always log everything to file at TRACE level for troubleshooting
+    logger.add(
+        f"{LOG_DIR}/interceptor.log",
+        level="TRACE",
+        rotation="10 MB",
+        retention="3 days",
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} — {message}",
     )
+
+    logger.info("Interceptor starting: hub={}:{}, log_level={}, log_file={}/interceptor.log",
+                 args.hub_host, args.hub_port, args.log_level, LOG_DIR)
 
     client = InterceptorClient(hub_host=args.hub_host, hub_port=args.hub_port)
     asyncio.run(client.run())
