@@ -16,28 +16,132 @@ POLL_INTERVAL = 0.5  # seconds
 
 
 def _find_session_files() -> list[Path]:
-    """Find all JSONL conversation files under ~/.claude/projects/."""
+    """Find top-level JSONL conversation files under ~/.claude/projects/.
+
+    Only returns files directly inside project directories — excludes subagent
+    files nested in subdirectories (e.g. <uuid>/subagents/*.jsonl).
+    """
     if not CLAUDE_PROJECTS_DIR.exists():
         logger.warning("Claude projects dir not found: %s", CLAUDE_PROJECTS_DIR)
         return []
-    return sorted(CLAUDE_PROJECTS_DIR.rglob("*.jsonl"))
+    # Session files live at <project-dir>/<uuid>.jsonl — exactly one level deep
+    return sorted(CLAUDE_PROJECTS_DIR.glob("*/*.jsonl"))
 
 
-def _parse_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Parse a JSONL file into a list of message dicts."""
-    messages = []
+_KEPT_CONTENT_TYPES = {"text", "thinking", "tool_use", "tool_result"}
+
+
+def _extract_content(content_blocks: Any) -> list[dict[str, Any]]:
+    """Normalise a content block list, keeping known types and dropping unknowns."""
+    if isinstance(content_blocks, str):
+        return [{"type": "text", "text": content_blocks}] if content_blocks else []
+    if not isinstance(content_blocks, list):
+        return []
+    result = []
+    for block in content_blocks:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") in _KEPT_CONTENT_TYPES:
+            result.append(block)
+        else:
+            logger.debug("Dropping unknown content block type: %s", block.get("type"))
+    return result
+
+
+def _build_message(raw: Any) -> dict[str, Any] | None:
+    """Convert a raw JSONL record into a structured message dict.
+
+    Returns None for non-user/assistant record types (e.g. queue-operation,
+    file-history-snapshot, ai-title, last-prompt).
+    """
+    if not isinstance(raw, dict):
+        return None
+    record_type = raw.get("type")
+    if record_type not in ("user", "assistant"):
+        return None
+
+    message = raw.get("message", {})
+    if not isinstance(message, dict):
+        return None
+
+    role = message.get("role", record_type)
+    content = _extract_content(message.get("content", []))
+
+    msg: dict[str, Any] = {
+        "role": role,
+        "uuid": raw.get("uuid", ""),
+        "timestamp": raw.get("timestamp", ""),
+        "session_id": raw.get("sessionId", ""),
+        "content": content,
+        "model": None,
+        "stop_reason": None,
+    }
+
+    if record_type == "assistant":
+        msg["model"] = message.get("model")
+        msg["stop_reason"] = message.get("stop_reason")
+
+    return msg
+
+
+def _extract_title(lines: list[Any]) -> str | None:
+    """Scan a list of parsed JSONL records for the first ai-title entry."""
+    for record in lines:
+        if isinstance(record, dict) and record.get("type") == "ai-title":
+            title = record.get("aiTitle")
+            if title:
+                return str(title)
+    return None
+
+
+def _parse_jsonl(path: Path) -> tuple[list[dict[str, Any]], str | None]:
+    """Parse a JSONL file into structured messages and an optional title.
+
+    Returns a tuple of (messages, title) where messages contains only
+    user/assistant records normalised through _build_message.
+    """
+    raw_records: list[Any] = []
     try:
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
                     try:
-                        messages.append(json.loads(line))
+                        raw_records.append(json.loads(line))
                     except json.JSONDecodeError:
                         logger.debug("Skipping malformed JSONL line in %s", path)
     except OSError as e:
         logger.error("Failed to read session file %s: %s", path, e)
-    return messages
+        return [], None
+
+    title = _extract_title(raw_records)
+    messages = [m for r in raw_records if (m := _build_message(r)) is not None]
+    return messages, title
+
+
+def _extract_title_from_file(path: Path) -> str | None:
+    """Scan a JSONL file for the first ai-title record.
+
+    Used by list_sessions(). Reads the full file since ai-title records
+    can appear at any position.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                    if isinstance(record, dict) and record.get("type") == "ai-title":
+                        title = record.get("aiTitle")
+                        if title:
+                            return str(title)
+                except json.JSONDecodeError:
+                    pass
+    except OSError:
+        pass
+    return None
 
 
 def _session_id_from_path(path: Path) -> str:
@@ -53,14 +157,20 @@ def _session_id_from_path(path: Path) -> str:
 
 
 def _path_from_session_id(session_id: str) -> Path:
-    """Resolve a session ID back to an absolute path."""
-    return CLAUDE_PROJECTS_DIR / session_id
+    """Resolve a session ID back to an absolute path.
+
+    Raises ValueError if the resolved path escapes CLAUDE_PROJECTS_DIR.
+    """
+    resolved = (CLAUDE_PROJECTS_DIR / session_id).resolve()
+    if not str(resolved).startswith(str(CLAUDE_PROJECTS_DIR.resolve())):
+        raise ValueError(f"session_id escapes projects dir: {session_id!r}")
+    return resolved
 
 
 def list_sessions() -> list[dict[str, Any]]:
     """Discover active Claude Code sessions.
 
-    Returns a list of dicts with keys: id, last_modified, project_path, file.
+    Returns a list of dicts with keys: id, last_modified, project_path, file, title.
     """
     sessions = []
     for path in _find_session_files():
@@ -68,12 +178,14 @@ def list_sessions() -> list[dict[str, Any]]:
         sid = _session_id_from_path(path)
         # Derive the project path from the directory structure
         project_path = str(path.parent.relative_to(CLAUDE_PROJECTS_DIR))
+        title = _extract_title_from_file(path)
         sessions.append(
             {
                 "id": sid,
                 "last_modified": stat.st_mtime,
                 "project_path": project_path,
                 "file": str(path),
+                "title": title,
             }
         )
     # Most recently modified first
@@ -84,11 +196,15 @@ def list_sessions() -> list[dict[str, Any]]:
 
 def read_session(session_id: str) -> list[dict[str, Any]]:
     """Read full conversation history from a session's JSONL file."""
-    path = _path_from_session_id(session_id)
+    try:
+        path = _path_from_session_id(session_id)
+    except ValueError:
+        logger.error("Invalid session_id: %s", session_id)
+        return []
     if not path.exists():
         logger.error("Session file not found: %s", path)
         return []
-    messages = _parse_jsonl(path)
+    messages, _ = _parse_jsonl(path)
     logger.info("Read %d messages from session %s", len(messages), session_id)
     return messages
 
@@ -99,7 +215,11 @@ def send_input(session_id: str, text: str) -> dict[str, Any]:
     MVP approach: shells out to `claude` with the message text.
     The session_id is used to determine the project directory context.
     """
-    path = _path_from_session_id(session_id)
+    try:
+        path = _path_from_session_id(session_id)
+    except ValueError:
+        logger.error("Invalid session_id: %s", session_id)
+        return {"success": False, "error": "Invalid session ID"}
     work_dir = str(path.parent) if path.parent.is_dir() else str(Path.home())
 
     logger.info("Sending input to session %s: %s", session_id, text[:80])
@@ -136,7 +256,11 @@ async def tail_session(
 
     Uses filesystem polling (mtime check every 500ms). Runs until cancelled.
     """
-    path = _path_from_session_id(session_id)
+    try:
+        path = _path_from_session_id(session_id)
+    except ValueError:
+        logger.error("Invalid session_id: %s", session_id)
+        return
     if not path.exists():
         logger.error("Cannot tail non-existent session: %s", path)
         return
@@ -153,22 +277,24 @@ async def tail_session(
                 continue
 
             last_mtime = current_mtime
-            # Read only new lines
+            # Read only new lines, tracking total count in-loop
             new_messages = []
+            current_line_count = 0
             with open(path, "r", encoding="utf-8") as f:
                 for i, line in enumerate(f):
+                    current_line_count = i + 1
                     if i < last_line_count:
                         continue
                     line = line.strip()
                     if line:
                         try:
-                            new_messages.append(json.loads(line))
+                            raw = json.loads(line)
+                            msg = _build_message(raw)
+                            if msg is not None:
+                                new_messages.append(msg)
                         except json.JSONDecodeError:
                             pass
-
-            # Update line count
-            with open(path, "r", encoding="utf-8") as f:
-                last_line_count = sum(1 for _ in f)
+            last_line_count = current_line_count
 
             if new_messages:
                 logger.info(
